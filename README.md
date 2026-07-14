@@ -1,104 +1,103 @@
-# AIDA64 RemoteSensor Server für Linux (ESP32-S3-Knob-Touch-LCD-1.8)
+# AIDA64 RemoteSensor Server for Linux (ESP32-S3-Knob-Touch-LCD-1.8)
 
-Ein kleiner, abhängigkeitsarmer Python-Server, der das AIDA64-"RemoteSensor"-
-Protokoll für den **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** nachbildet – für
-alle, die ihre CPU-/GPU-Werte auf dem Knob-Display anzeigen wollen, aber
-**kein Windows/AIDA64 zur Hand haben oder wollen**, weil AIDA64 nur unter
-Windows läuft.
+A small, low-dependency Python server that replicates the AIDA64
+"RemoteSensor" protocol for the **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** —
+for anyone who wants to display their CPU/GPU stats on the Knob's screen but
+**doesn't have (or want) Windows/AIDA64**, since AIDA64 is Windows-only.
 
-Das Werksfirmware-Feature "PC Monitor" ist offiziell nur mit echtem AIDA64
-(Windows-only) dokumentiert. Dieses Projekt implementiert das (nirgends
-öffentlich dokumentierte) Wire-Protokoll direkt unter Linux nach, gespeist
-aus `psutil`, `lm-sensors` und sysfs.
+The stock firmware's "PC Monitor" feature is officially documented only for
+real AIDA64 (Windows-only). This project reimplements the (nowhere publicly
+documented) wire protocol natively on Linux, fed by `psutil`, `lm-sensors`,
+and sysfs.
 
-📖 Wie genau das Protokoll aussieht und wie wir es gefunden haben, steht in
-[PROTOCOL.md](./PROTOCOL.md) – falls du eigene Clients/Server dafür bauen
-willst oder einfach neugierig bist, wie zäh dieses Reverse Engineering war.
+📖 For the full protocol write-up and how we reverse-engineered it, see
+[PROTOCOL.md](./PROTOCOL.md) — useful if you want to build your own
+clients/servers for it, or are just curious how tricky this reverse
+engineering turned out to be.
 
-## Unterstützte Hardware
+*(German originals: [README.de.md](./README.de.md) / [PROTOCOL.de.md](./PROTOCOL.de.md))*
 
-- **CPU:** Auslastung, Takt, Temperatur, Lüfterdrehzahl via `psutil` +
+## Supported hardware
+
+- **CPU:** usage, clock speed, temperature, fan speed via `psutil` +
   `lm-sensors` (Intel `coretemp`, AMD `k10temp`/`zenpower`)
-- **GPU:** automatische Erkennung, erste gefundene Karte wird genutzt
-  - **AMD** (amdgpu-Treiber): Auslastung, Takt (inkl. Fallback für den
-    `auto`-Performance-Modus), Temperatur, Lüfter – rein über sysfs, kein
-    Root nötig
-  - **NVIDIA**: über `nvidia-smi`
-  - **Intel iGPU**: Takt über sysfs; Auslastung bewusst nicht implementiert
-    (würde `intel_gpu_top` mit Root/`CAP_PERFMON` brauchen und kann sonst
-    mehrere Sekunden hängen – siehe PROTOCOL.md, Fallstrick 3)
+- **GPU:** auto-detected, first card found is used
+  - **AMD** (amdgpu driver): usage, clock (including a fallback for `auto`
+    performance mode), temperature, fan — purely via sysfs, no root needed
+  - **NVIDIA**: via `nvidia-smi`
+  - **Intel iGPU**: clock via sysfs; usage via sysfs `engine/*/busy` where
+    available, with a debugfs fallback (root, since the server already runs
+    as root for port 80) — see PROTOCOL.md for details
 
-## Voraussetzungen
+## Requirements
 
 ```bash
 sudo apt install python3-pip lm-sensors
 pip install psutil --break-system-packages
 ```
 
-`sensors-detect` ist **nicht immer nötig**: moderne CPU-/GPU-Sensortreiber
-(`k10temp`, `zenpower`, `coretemp`, `amdgpu`) sind kernel-native Treiber und
-laden sich automatisch, sobald der Kernel die passende Hardware erkennt –
-das betrifft die meisten Laptops. `sensors-detect` sucht stattdessen nach
-älteren Super-I/O-Chips (z.B. `nct6775`, `it87`), wie sie auf **Desktop-
-Mainboards** für Lüftersteuerung/Spannungen verbaut sind. Lohnt sich also
-eher bei Desktop-PCs auszuprobieren:
+`sensors-detect` is **not always necessary**: modern CPU/GPU sensor drivers
+(`k10temp`, `zenpower`, `coretemp`, `amdgpu`) are native kernel drivers and
+load automatically once the kernel recognizes the matching hardware — this
+covers most laptops. `sensors-detect` instead looks for older Super-I/O
+chips (e.g. `nct6775`, `it87`) as found on **desktop mainboards** for fan
+control/voltages. So it's mainly worth trying on desktop PCs:
 
 ```bash
-sudo sensors-detect   # optional, v.a. bei Desktop-Mainboards relevant
+sudo sensors-detect   # optional, mainly relevant for desktop mainboards
 ```
 
-Kurzer Check, ob überhaupt schon was da ist, bevor du dir die Mühe machst:
+Quick check whether something's already there before bothering with
+`sensors-detect`:
 ```bash
 sensors
 ```
-Zeigt das schon plausible Werte (Tctl, Package id 0, edge, ...), kannst du
-`sensors-detect` getrost überspringen.
+If this already shows plausible values (Tctl, Package id 0, edge, ...), you
+can safely skip `sensors-detect`.
 
-## Firmware auf dem Knob
+## Firmware on the Knob
 
-Das Board hat zwei Chips (ESP32 + ESP32-S3), die je nach Orientierung des
-Type-C-Steckers unterschiedliche Download-Kanäle ansprechen.
+The board has two chips (ESP32 + ESP32-S3) that respond to different
+download channels depending on the orientation of the USB-C plug.
 
 ```bash
 pip install esptool --break-system-packages
-sudo usermod -aG dialout $USER   # danach neu einloggen
+sudo usermod -aG dialout $USER   # log out and back in afterward
 
-# ESP32 (Sub-Chip):
+# ESP32 (sub-chip):
 esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 115200 \
   write_flash -z 0x0 ESP32-KNOB_ESP32_0.bin
 
-# Kabel umdrehen, dann ESP32-S3 (Hauptchip):
+# Flip the cable, then ESP32-S3 (main chip):
 esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 115200 \
   write_flash -z 0x0 WX-ESP32S3-KNOB_V1.2.bin
 ```
 
-Firmware + `.rslcd`-Konfigurationsdatei gibt es offiziell bei Waveshare:
+Firmware + `.rslcd` config file are officially available from Waveshare:
 https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8
 
-## Server starten
+## Starting the server
 
 ```bash
 sudo python3 aida_sse_server.py --port 80
 ```
 
-Danach in der Weboberfläche des Knobs (IP des Knobs im Browser öffnen) unter
-"PC Monitor" / "Secondary Screen Host Address" die IP dieses Linux-Rechners
-eintragen.
+Then, in the Knob's web UI (open the Knob's IP in a browser), enter this
+Linux machine's IP under "PC Monitor" / "Secondary Screen Host Address".
 
-### Debug-Ansicht
+### Debug view
 
-`http://<server-ip>/` im Browser zeigt eine 1:1-Kopie der echten
-AIDA64-RemoteSensor-Seite (reiner Text, absolut positioniert, kein Styling)
-– nützlich, um das Datenformat unabhängig vom physischen Knob-Display zu
-verifizieren.
+`http://<server-ip>/` in a browser shows a 1:1 copy of the real AIDA64
+RemoteSensor page (plain text, absolutely positioned, no styling) — useful
+for verifying the data format independently of the physical Knob display.
 
-### Als systemd-Dienst (empfohlen für Dauerbetrieb)
+### As a systemd service (recommended for permanent use)
 
 ```bash
 sudo cp aida_sse_server.py /opt/aida_sse_server.py
 sudo tee /etc/systemd/system/aida-sse-server.service <<'EOF'
 [Unit]
-Description=AIDA64-kompatibler SSE Sensor-Server fuer ESP32 Knob
+Description=AIDA64-compatible SSE sensor server for ESP32 Knob
 After=network.target
 
 [Service]
@@ -113,51 +112,51 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now aida-sse-server
 ```
 
-## Bekannte Einschränkungen
+## Known limitations
 
-- Nur die erste erkannte GPU wird ausgelesen (kein Multi-GPU-Support)
-- Intel-GPU-Auslastung wird nicht angezeigt (siehe oben)
-- **Lüfterdrehzahl bei vielen Laptops nicht auslesbar** (zeigt dann `0` an,
-  ist kein Bug): Laptop-Hersteller geben die RPM oft nur über ihren eigenen
-  Embedded Controller frei, den Linux standardmäßig nicht ausliest. Getestet
-  z.B. auf einem HP ZBook 14 G1 (AMD Ryzen + integrierte AMD-GPU) – CPU-/GPU-
-  Temperatur und -Takt funktionieren dort einwandfrei, Lüfter-RPM nicht.
-- Getestet mit Firmware `WX-ESP32S3-KNOB_V1.2.bin` / `ESP32-KNOB_ESP32_0.bin`
-  (Stand 2026) – andere Firmware-Versionen könnten ein leicht anderes
-  Protokoll sprechen
+- Only the first detected GPU is read (no multi-GPU support)
+- **Fan speed is not readable on many laptops** (shows `0`, not a bug):
+  laptop vendors often only expose RPM through their own embedded
+  controller, which Linux doesn't read by default. Tested e.g. on an HP
+  ZBook 14 G1 (AMD Ryzen + integrated AMD GPU) — CPU/GPU temperature and
+  clock work fine there, fan RPM doesn't.
+- Tested with firmware `WX-ESP32S3-KNOB_V1.2.bin` / `ESP32-KNOB_ESP32_0.bin`
+  (as of 2026) — other firmware versions might speak a slightly different
+  protocol
 
-## Verwandte Projekte
+## Related projects
 
-Dieses Projekt fokussiert sich **nur** auf das AIDA64-"PC Monitor"-Feature der
-originalen Werksfirmware unter Linux. Wenn du stattdessen die **komplette
-Werksfirmware ersetzen** und den Knob in **Home Assistant** einbinden willst
-(Uhr/Wetter-UI, Media-Player-Steuerung, Batterie, SD-Karte, Haptik-Motor,
-etc.), schau dir diese ESPHome-basierten Projekte an:
+This project focuses **exclusively** on replicating AIDA64's "PC Monitor"
+feature of the original stock firmware on Linux. If you'd rather **replace
+the entire stock firmware** and integrate the Knob into **Home Assistant**
+(clock/weather UI, media player control, battery, SD card, haptic motor,
+etc.), check out these ESPHome-based projects:
 
-- [nkinnan/Waveshare-ESP32-S3-Knob-Touch-LCD-1.8_and_Guition-K5-Knob-Series-JC3636K518](https://github.com/nkinnan/Waveshare-ESP32-S3-Knob-Touch-LCD-1.8_and_Guition-K5-Knob-Series-JC3636K518) – volle Peripherie-Unterstützung für Waveshare- und Guition-Klon
-- [KrX3D/WaveShare-Knob-Esp32S3](https://github.com/KrX3D/WaveShare-Knob-Esp32S3) – Display, Touch, Encoder, LVGL-UI, Media-Player, Batterie, SD-Karte, Haptik
+- [nkinnan/Waveshare-ESP32-S3-Knob-Touch-LCD-1.8_and_Guition-K5-Knob-Series-JC3636K518](https://github.com/nkinnan/Waveshare-ESP32-S3-Knob-Touch-LCD-1.8_and_Guition-K5-Knob-Series-JC3636K518) — full peripheral support for both the Waveshare board and the Guition clone
+- [KrX3D/WaveShare-Knob-Esp32S3](https://github.com/KrX3D/WaveShare-Knob-Esp32S3) — display, touch, encoder, LVGL UI, media player, battery, SD card, haptics
 
-**Wichtiger Unterschied:** Diese Projekte werfen die Werksfirmware komplett
-weg und holen sich PC-Sensordaten (falls überhaupt gewünscht) über die
-Home-Assistant-API (z.B. deren `systemmonitor`-Integration), nicht über das
-originale AIDA64-Wire-Protokoll. Sie ersetzen also die Firmware, während
-dieses Projekt hier die **originale Werksfirmware unverändert weiterbenutzt**
-und nur den fehlenden Windows/AIDA64-Teil unter Linux nachbaut.
+**Important difference:** those projects discard the stock firmware
+entirely and (if they want PC sensor data at all) fetch it via the Home
+Assistant API (e.g. its `systemmonitor` integration), not via the original
+AIDA64 wire protocol. So they replace the firmware, while this project here
+keeps the **original stock firmware unmodified** and only fills in the
+missing Windows/AIDA64 piece on Linux.
 
-Beide nkinnan und KrX3D bestätigen übrigens, dass auch sie **keinen
-Quellcode für die originale AIDA64-Funktion der Werksfirmware** finden
-konnten – die [PROTOCOL.md](./PROTOCOL.md) in diesem Repo dürfte damit
-aktuell die einzige öffentliche Dokumentation dieses Wire-Formats sein.
+Incidentally, both nkinnan and KrX3D confirm that they, too, could not find
+any **source code for the original AIDA64 feature of the stock firmware** —
+[PROTOCOL.md](./PROTOCOL.md) in this repo is currently probably the only
+public documentation of this wire format.
 
-## Mitmachen
+## Contributing
 
-Pull Requests willkommen, insbesondere für:
-- Multi-GPU-Unterstützung
-- Weitere Sensor-Slots (RAM, Netzwerk, Disk – Positionen einfach in der
-  `.rslcd` ergänzen und in `build_sse_payload()` nachziehen)
-- Bestätigung/Widerlegung der offenen Fragen in PROTOCOL.md (idealerweise
-  mit Xtensa-Disassembly der Firmware)
+Pull requests welcome, especially for:
+- Multi-GPU support
+- Additional sensor slots (RAM, network, disk — just add the positions in
+  the `.rslcd` and follow through in `build_sse_payload()`)
+- Confirming/disproving the open questions in PROTOCOL.md (ideally with
+  Xtensa disassembly of the firmware)
 
-## Lizenz
+## License
 
-MIT (siehe [LICENSE](./LICENSE)) – nutzt, forkt, verbessert, wie ihr wollt.
+MIT (see [LICENSE](./LICENSE)) — use it, fork it, improve it, however you
+like.

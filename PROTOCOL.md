@@ -1,24 +1,23 @@
-# Das AIDA64-RemoteSensor-Protokoll (reverse-engineered)
+# The AIDA64 RemoteSensor protocol (reverse-engineered)
 
-Dieses Dokument beschreibt, wie das Waveshare **ESP32-S3-Knob-Touch-LCD-1.8**
-(Firmware `WX-ESP32S3-KNOB_V1.2.bin`, Stand 2026) tatsächlich mit AIDA64
-kommuniziert. Weder Waveshare noch AIDA64 dokumentieren dieses Wire-Format
-öffentlich – die folgenden Informationen wurden durch Firmware-Analyse
-(`strings`) und Wireshark-Mitschnitte einer echten, funktionierenden
-AIDA64-Instanz gewonnen.
+This document describes how the Waveshare **ESP32-S3-Knob-Touch-LCD-1.8**
+(firmware `WX-ESP32S3-KNOB_V1.2.bin`, as of 2026) actually communicates
+with AIDA64. Neither Waveshare nor AIDA64 publicly document this wire
+format — the information below was obtained through firmware analysis
+(`strings`) and Wireshark captures of a real, working AIDA64 instance.
 
-## Kurzfassung
+## TL;DR
 
-- Der Knob macht periodisch `GET /sse` an die in seiner Weboberfläche
-  hinterlegte "PC Monitor"-IP.
-- Der Server antwortet **einmalig pro Anfrage** (kein Dauerstreaming trotz
-  SSE-Content-Type) mit HTTP-Headern und einer einzeiligen `data:`-Zeile.
-- **Die Antwort muss innerhalb von wenigen hundert Millisekunden kommen.**
-  Der Knob gibt anscheinend nach recht kurzer Zeit auf und verarbeitet eine
-  zu spät eintreffende (aber sonst korrekte) Antwort nicht mehr. Siehe
-  [Fallstrick 3](#fallstrick-3-antwortzeit).
+- The Knob periodically makes a `GET /sse` request to the "PC Monitor" IP
+  configured in its web UI.
+- The server responds **once per request** (no ongoing streaming despite
+  the SSE content type) with HTTP headers and a single-line `data:` line.
+- **The response has to arrive within a few hundred milliseconds.** The
+  Knob apparently gives up fairly quickly and won't process a late (but
+  otherwise correct) response anymore. See
+  [Pitfall 3](#pitfall-3-response-time).
 
-## Der Request
+## The request
 
 ```
 GET /sse HTTP/1.1
@@ -26,16 +25,17 @@ Host: <ip>
 Connection: close
 
 ```
-(mit `\r\n`-Zeilenenden, ganz normales HTTP/1.1)
+(with `\r\n` line endings, entirely normal HTTP/1.1)
 
-Beobachtung: Die Firmware sendet den Request in **zwei separaten TCP-Segmenten**
-(zuerst ca. 17 Byte, dann den Rest) – vermutlich zwei aufeinanderfolgende
-`send()`-Aufrufe im Firmware-Code. Das ist für einen Server aus Sicht der
-Standard-Socket-API transparent, fiel uns aber im Wireshark-Mitschnitt auf.
+Observation: the firmware sends the request in **two separate TCP
+segments** (first about 17 bytes, then the rest) — presumably two
+consecutive `send()` calls in the firmware code. That's transparent to a
+server using the standard socket API, but it stood out in the Wireshark
+capture.
 
-## Die Response
+## The response
 
-Byte-genauer Mitschnitt einer echten AIDA64-Antwort:
+Byte-exact capture of a real AIDA64 response:
 
 ```
 HTTP/1.1 200 OK
@@ -48,64 +48,64 @@ Access-Control-Allow-Credentials: true
 data: Page0|{|}Simple1|CPU usage 17^{|}Simple2|CPU freq 1600^{|}Simple3|CPU temp 57^{|}Simple4|CPU fan 6578^{|}Simple5|{|}Simple6|GPU freq 100^{|}Simple7|GPU temp TRIAL^{|}Simple8|GPU fan 0^{|}
 ```
 
-### Fallstrick 1: Zeilenenden sind `\n`, nicht `\r\n`
+### Pitfall 1: line endings are `\n`, not `\r\n`
 
-Das ist der Kernel des ganzen Problems. Technisch verlangt HTTP/1.1
-`\r\n` als Zeilenende. **AIDA64s eingebauter Webserver hält sich nicht
-daran und schickt nur `\n`.** Browser und `curl` sind da tolerant und
-parsen es trotzdem korrekt – die Knob-Firmware ist es (vermutlich) nicht:
-sie scannt wahrscheinlich stur nach der Byte-Folge `\n\n`, um das Ende der
-Header zu erkennen. `\r\n\r\n` enthält kein `\n\n` als Teilstring, also
-wird bei standardkonformen `\r\n`-Antworten (wie Pythons `http.server` sie
-automatisch erzeugt) nie ein Ende der Header gefunden.
+This is the crux of the whole problem. Technically HTTP/1.1 requires `\r\n`
+as the line ending. **AIDA64's built-in web server doesn't stick to that
+and sends only `\n`.** Browsers and `curl` are lenient and parse it
+correctly anyway — the Knob firmware (presumably) isn't: it likely scans
+strictly for the byte sequence `\n\n` to detect the end of headers.
+`\r\n\r\n` doesn't contain `\n\n` as a substring, so standards-compliant
+`\r\n` responses (like Python's `http.server` produces automatically)
+never yield a detected end of headers.
 
-**Konsequenz:** Header von Hand als rohe Bytes mit `\n` bauen, nicht die
-`send_header()`/`end_headers()`-Helfer der Standardbibliothek verwenden.
+**Consequence:** build headers by hand as raw bytes with `\n`, don't use
+the standard library's `send_header()`/`end_headers()` helpers.
 
-### Fallstrick 2: Simple-IDs sind Positions-Slots, keine Sensor-IDs
+### Pitfall 2: Simple IDs are positional slots, not sensor IDs
 
-Man könnte erwarten, dass die ID (`SCPUUTI`, `TCPUPKG`, ...) aus AIDA64s
-"Complete Sensor Value List" übertragen wird. **Das ist nicht der Fall.**
-Übertragen wird stattdessen `SimpleN`, wobei `N` schlicht die Position
-(1-8) des Eintrags in der importierten `.rslcd`-Layoutdatei ist. Die
-Firmware kennt daher gar keine AIDA64-Sensor-IDs (im kompilierten Binary
-kommt z.B. der String `SCPUUTI` kein einziges Mal vor) – sie matcht rein
-positionell gegen ihre eigenen, fest einprogrammierten Labels
-(`CPU usage`, `CPU freq`, `CPU temp`, `CPU fan`, `GPU usage`, `GPU freq`,
-`GPU temp`, `GPU fan` - exakt in dieser Reihenfolge).
+You might expect the ID (`SCPUUTI`, `TCPUPKG`, ...) from AIDA64's
+"Complete Sensor Value List" to be transmitted. **That's not the case.**
+Instead, `SimpleN` is transmitted, where `N` is simply the position (1-8)
+of the entry in the imported `.rslcd` layout file. The firmware therefore
+doesn't know about AIDA64 sensor IDs at all (e.g. the string `SCPUUTI`
+doesn't appear anywhere in the compiled binary) — it matches purely
+positionally against its own hardcoded labels (`CPU usage`, `CPU freq`,
+`CPU temp`, `CPU fan`, `GPU usage`, `GPU freq`, `GPU temp`, `GPU fan` — in
+exactly this order).
 
-Format pro Eintrag: `SimpleN|<Label> <Wert>^`. Mehrere Einträge werden mit
-`{|}` verbunden, die ganze Payload beginnt mit einem leeren `Page0|`-Präfix.
+Format per entry: `SimpleN|<Label> <Value>^`. Multiple entries are joined
+with `{|}`, and the whole payload starts with an empty `Page0|` prefix.
 
-Das `^` am Ende jedes Werts ist **Pflicht** und kommt aus dem
-`Show unit`-Feld der `.rslcd` (dort literal auf `^` gesetzt) – es dient
-offenbar als Terminator-Zeichen, keine echte Einheit.
+The `^` at the end of each value is **mandatory** and comes from the
+`.rslcd`'s `Show unit` field (literally set to `^` there) — it apparently
+serves as a terminator character, not an actual unit.
 
-### Fallstrick 3: Antwortzeit
+### Pitfall 3: response time
 
-Der eigentliche Show-Stopper, nachdem Format und Zeilenenden schon korrekt
-waren. Per Wireshark-Timing-Vergleich:
+The real show-stopper, once the format and line endings were already
+correct. Per Wireshark timing comparison:
 
-| Server | Zeit von "Request komplett empfangen" bis "Antwort gesendet" |
+| Server | Time from "request fully received" to "response sent" |
 |---|---|
-| Echtes AIDA64 | ~56 ms |
-| Unser erster Python-Versuch (mit `intel_gpu_top`/`nvidia-smi`-Aufrufen à 2s Timeout) | ~2200 ms |
+| Real AIDA64 | ~56 ms |
+| Our first Python attempt (with `intel_gpu_top`/`nvidia-smi` calls at a 2s timeout) | ~2200 ms |
 
-Bei >2 Sekunden Verzögerung kam die Antwort zwar TCP-technisch sauber und
-vollständig an (wurde vom Knob auch ge-ACKt) – wurde aber nie auf dem
-Display angezeigt. Vermutung: Die Firmware hat intern eine kurze
-Lese-Timeout-Grenze und gibt den Socket application-seitig auf, bevor
-späte Daten noch verarbeitet werden, auch wenn sie auf TCP-Ebene im
-Empfangspuffer liegen.
+At delays above ~2 seconds, the response arrived cleanly and completely on
+the wire (and was even ACKed by the Knob) — but was never shown on the
+display. Hypothesis: the firmware internally has a short read-timeout and
+gives up on the socket at the application level before late data gets
+processed, even if it's technically sitting in the receive buffer at the
+TCP level.
 
-**Konsequenz:** Sensor-Abfragen müssen im niedrigen einstelligen
-Millisekundenbereich bleiben. Insbesondere `intel_gpu_top` (braucht oft
-Root/`CAP_PERFMON` und kann ohne diese Rechte lange hängen) sollte
-vermieden oder mit sehr kurzem Timeout versehen werden.
+**Consequence:** sensor queries need to stay in the low single-digit
+millisecond range. In particular, `intel_gpu_top` (often needs
+root/`CAP_PERFMON` and can hang for a long time without those privileges)
+should be avoided or given a very short timeout.
 
-## Reihenfolge / Positionen (aus der mitgelieferten `.rslcd`)
+## Order / positions (from the bundled `.rslcd`)
 
-| Slot | Label | ITMY (Pixel-Position) |
+| Slot | Label | ITMY (pixel position) |
 |---|---|---|
 | Simple1 | CPU usage | 0 |
 | Simple2 | CPU freq | 20 |
@@ -116,16 +116,17 @@ vermieden oder mit sehr kurzem Timeout versehen werden.
 | Simple7 | GPU temp | 140 |
 | Simple8 | GPU fan | 160 |
 
-## Offene Fragen / nicht abschließend geklärt
+## Open questions / not fully resolved
 
-- Ob die Firmware wirklich stur nach `\n\n` sucht oder ob es einen anderen
-  Grund für die CRLF-Empfindlichkeit gibt, haben wir nicht per Disassembly
-  verifiziert (kein Xtensa-Toolchain zur Hand) – nur empirisch bestätigt,
-  dass die Umstellung von `\r\n` auf `\n` das Problem behoben hat.
-- Warum die Firmware manchmal ihren Request-Stream sofort per FIN
-  halbschließt und manchmal nicht (beobachtet auch bei echtem AIDA64,
-  dort ca. 1 von 6 Verbindungsversuchen ohne jede Serverantwort), ist
-  ungeklärt. Vermutlich eine Eigenheit des ESP32-Netzwerkstacks
-  (lwIP) unter WLAN-Last.
-- Der genaue Timeout-Wert, ab dem die Firmware eine Antwort verwirft, wurde
-  nicht exakt eingegrenzt (wir wissen nur: 56ms geht, 2200ms nicht).
+- Whether the firmware really does scan strictly for `\n\n`, or whether
+  there's some other reason for the CRLF sensitivity, hasn't been
+  verified via disassembly (no Xtensa toolchain on hand) — only confirmed
+  empirically that switching from `\r\n` to `\n` fixed the problem.
+- Why the firmware sometimes half-closes its request stream via FIN
+  immediately and sometimes doesn't (also observed with real AIDA64,
+  about 1 in 6 connection attempts there got no server response at all)
+  is unresolved. Likely a quirk of the ESP32 network stack (lwIP) under
+  WiFi load.
+- The exact timeout value beyond which the firmware discards a response
+  wasn't precisely pinned down (we only know: 56ms works, 2200ms
+  doesn't).
