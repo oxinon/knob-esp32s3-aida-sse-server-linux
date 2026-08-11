@@ -91,6 +91,77 @@ Linux machine's IP under "PC Monitor" / "Secondary Screen Host Address".
 RemoteSensor page (plain text, absolutely positioned, no styling) — useful
 for verifying the data format independently of the physical Knob display.
 
+### Terminal dashboard (interactive, htop/nvtop-style)
+
+If you'd rather watch the server interactively from the terminal instead
+of (or in addition to) the plain-text debug page, `aida_tui.py` starts
+the exact same server (it imports and reuses `aida_sse_server.py`
+unmodified) and shows a live `curses` dashboard on top:
+
+```bash
+sudo python3 aida_tui.py --port 80
+```
+
+It shows:
+
+- **Knob connection status** — CONNECTED / WAITING FOR KNOB / DISCONNECTED
+  (TIMEOUT), derived from how long ago the last valid `/sse` request came
+  in (the Knob polls repeatedly and opens a fresh connection each time,
+  it doesn't keep one open — see `PROTOCOL.md`). Also shows the client
+  IP, last response time in ms, total request/error counts, and a preview
+  of the last payload actually sent.
+- **Live CPU/GPU readings** (usage meter, clock, temperature, fan),
+  polled independently every ~1.5s so you see current values even
+  between Knob requests.
+- **A short history of the last requests** (time, client IP, response
+  time, status).
+
+Keys: `r` refresh sensors now, `c` clear the request history, `q` quit
+(also stops the server). Use `--timeout <seconds>` to change how long
+without a request counts as "disconnected" (default: 5s). It also
+gracefully handles terminal resizes and shows a "terminal too small"
+notice below 72x26 instead of a garbled layout.
+
+#### Binding to a specific device / IP, or restricting to an IP range
+
+By default the server listens on `0.0.0.0`, i.e. every network
+interface on the machine. `aida_tui.py` has three flags to narrow that
+down (combine them as needed):
+
+- **`--host <ip>`** — bind to one specific local IP address (and
+  therefore implicitly one specific network interface), instead of all
+  of them:
+  ```bash
+  sudo python3 aida_tui.py --host 192.168.1.50 --port 80
+  ```
+- **`--iface <name>`** — bind directly to a network interface by name
+  (e.g. `eth0`), independent of its IP, via `SO_BINDTODEVICE`. Linux
+  only, needs root (which you already have for port 80 anyway):
+  ```bash
+  sudo python3 aida_tui.py --iface eth0 --port 80
+  ```
+- **`--allow <cidr[,cidr...]>`** — restrict which clients may connect at
+  all, by IP range(s)/CIDR. TCP can only bind to a single address, not
+  a "range" — so for "reachable only from my LAN" this allow-list is
+  the right mechanism: the server still binds normally, but every
+  request is checked against the list first; anything outside it gets
+  HTTP 403 (and shows up as `FEHLER blockiert (--allow)` in the
+  dashboard's request history):
+  ```bash
+  sudo python3 aida_tui.py --allow 192.168.1.0/24
+  sudo python3 aida_tui.py --allow 192.168.1.0/24,10.0.0.5   # multiple ranges/IPs
+  ```
+
+The dashboard's "Server" box shows whichever of `--iface`/`--allow` is
+active, so you can confirm at a glance that the restriction took effect.
+
+Note: this is an interactive tool meant to be run in a terminal (locally
+or via SSH/tmux) while you're actually looking at it — for unattended,
+permanent operation use the plain `aida_sse_server.py` as a systemd
+service (below), which has no terminal-UI overhead. (`aida_sse_server.py`
+itself only has `--host`/`--port`, not `--iface`/`--allow` — let me know
+if you'd like those ported over there too.)
+
 ### As a systemd service (recommended for permanent use)
 
 ```bash
